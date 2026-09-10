@@ -80,18 +80,13 @@ export default {
       // 发起代理请求
       const response = await fetch(targetUrl, init);
 
-      // 构造返回响应，添加 CORS 头
-      const respHeaders = new Headers(response.headers);
-      respHeaders.set("Access-Control-Allow-Origin", "*");
-      respHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS");
-      respHeaders.set("Access-Control-Allow-Headers", "*");
-
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: respHeaders,
-      });
+      // 原样透传目标响应（包括 400 / 502 等错误状态），仅在返回头追加 CORS
+      return withCORS(response);
     } catch (err) {
+      // fetch 抛出异常时，若异常本身携带响应，则原样返回该响应
+      if (err && err.response instanceof Response) {
+        return withCORS(err.response);
+      }
       return new Response(JSON.stringify({ error: err.message }), {
         status: 502,
         headers: { "Content-Type": "application/json" },
@@ -99,6 +94,21 @@ export default {
     }
   },
 };
+
+function withCORS(response) {
+  const respHeaders = new Headers(response.headers);
+  respHeaders.set("Access-Control-Allow-Origin", "*");
+  respHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS");
+  respHeaders.set("Access-Control-Allow-Headers", "*");
+
+  // 无响应体的状态码（204/304 等）必须传 null
+  const noBody = [101, 204, 205, 304].includes(response.status);
+  return new Response(noBody ? null : response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: respHeaders,
+  });
+}
 
 function handleCORS() {
   return new Response(null, {
