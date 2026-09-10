@@ -1,4 +1,4 @@
-name = "request-proxy"
+name = "proxy"
 main = "proxy.js"
 compatibility_date = "2026-05-03"
 
@@ -6,6 +6,12 @@ compatibility_date = "2026-05-03"
 [assets]
 directory = "./public"
 binding = "ASSETS"
+
+# Workers VPC：绑定私有网络中的 home-mac 服务
+[[vpc_services]]
+binding = "VPC_ARMBIAN"
+service_id = "01a08cb1-20d4-7ab3-909d-3fda4dbd0840"
+remote = true
 
 # WebSocket 分发用 Durable Object
 [[durable_objects.bindings]]
@@ -15,6 +21,15 @@ class_name = "WebSocketHub"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["WebSocketHub"]
+
+[var]
+DEBUG_MODE = 0
+FORCE_REWRITE = 0
+PROXY_VPC = "VPC_ARMBIAN"
+PROXY_ORIGIN = "http://armbian"
+
+
+
 
 # 部署： npx wrangler deploy
 # 本地调试： npx wrangler dev

@@ -2,26 +2,20 @@
  * Cloudflare Worker — 通用请求代理 (Request Proxy)
  *
  * 用法：
- *   将 TARGET_BASE 配置改为你想要代理的目标地址（不含末尾斜杠）。
+ *   所有请求会被转发到 Cloudflare Workers VPC 中的 home-mac 服务
+ *   （绑定名 HOME_MAC，见 wrangler.toml 的 vpc_services）。
  *   部署后，访问 https://<your-worker>.workers.dev/<path>
- *   请求会被转发到 TARGET_BASE/<path>，并原样返回响应。
- *
- *   也可以通过 Header "x-proxy-target"（目标 base）或 URL 参数 "target"（完整目标链接）
- *   动态指定目标地址，例如：
- *     curl -H "x-proxy-target: https://api.example.com" https://<worker>.workers.dev/users
- *     curl "https://<worker>.workers.dev/?target=https://api.example.com/users?page=1"
+ *   请求会被转发到 home-mac 服务的 <path>，并原样返回响应。
  *
  * WebSocket 分发端点：
  *   连接 wss://<worker>.workers.dev/ws?topics=system,user 即可订阅一个或多个 topic。
  *   客户端发送 JSON 消息 { "topic": "system", "data": ... }，
  *   该消息会被分发给所有订阅了 "system" 的连接（默认不回发给发送者，可用 echo 控制）。
+ *
+ * 单请求代理 转发端点：
+ *   连接 https://<worker>.workers.dev/proxy?target=https://www.xx.com?aa=1。
+ *
  */
-
-// ====== 配置 ======
-const TARGET_BASE = "https://www.baidu.com"; // 默认代理目标（不含末尾斜杠）
-const PROXY_PREFIX = "";
-const ALLOW_DYNAMIC_TARGET = true; // 是否允许通过 Header 动态指定目标
-// ==================
 
 export default {
   async fetch(request, env, ctx) {
@@ -32,8 +26,12 @@ export default {
       return handleWebSocket(request, env);
     }
 
-    if(url.pathname.startsWith(PROXY_PREFIX)) {
-      return await handleProxy(request, env, ctx);
+    if (url.pathname === "/proxy") {
+      return await handleProxyUrl(request, env,ctx);
+    }
+
+    if(env.PROXY_ORIGIN) {
+        return await handleProxy(request, env, ctx);
     }
 
     return new Response("", {
@@ -41,6 +39,59 @@ export default {
     });
   },
 };
+
+async function handleProxyUrl(request, env, ctx) {
+  // 只允许 GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS
+  const allowedMethods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+  if (!allowedMethods.includes(request.method)) {
+    return new Response("Method Not Allowed", { status: 405 });
+  }
+
+  // CORS 预检
+  if (request.method === "OPTIONS") {
+    return handleCORS();
+  }
+
+  const url = new URL(request.url);
+  try {
+    const targetUrl = url.searchParams.get("target");
+    // 构造转发请求的 headers，去掉 hop-by-hop 和代理专用头
+    const proxyHeaders = new Headers(request.headers);
+    ["host", "x-proxy-target", "cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor", "cdn-loop"].forEach((h) => {
+      proxyHeaders.delete(h);
+    });
+
+    // 构造转发请求
+    const init = {
+      method: request.method,
+      headers: proxyHeaders,
+      redirect: "manual",
+    };
+
+    // 对有 body 的方法，透传请求体
+    if (["POST", "PUT", "PATCH"].includes(request.method)) {
+      init.body = request.body;
+      // 保留原始 Content-Type
+      const ct = request.headers.get("Content-Type");
+      if (ct) init.headers.set("Content-Type", ct);
+    }
+    // 发起代理请求
+    const response = await fetch(targetUrl, init);
+
+    // 原样透传目标响应（包括 400 / 502 等错误状态），仅在返回头追加 CORS
+    return withCORS(response, url);
+  } catch (err) {
+    // fetch 抛出异常时，若异常本身携带响应，则原样返回该响应
+    if (err && err.response instanceof Response) {
+      return withCORS(err.response, url);
+    }
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 502,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+}
+
 
 async function handleProxy(request, env, ctx) {
   // 只允许 GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS
@@ -54,31 +105,15 @@ async function handleProxy(request, env, ctx) {
     return handleCORS();
   }
 
+  const url = new URL(request.url);
   try {
-    const url = new URL(request.url);
-    const targetParam = url.searchParams.get("target");
-    const headerTarget = request.headers.get("x-proxy-target");
+    // 从转发查询参数中移除代理专用的 target，避免泄露给目标服务
+    const forwardParams = new URLSearchParams(url.searchParams);
+    forwardParams.delete("target");
+    const forwardSearch = forwardParams.toString();
 
-    let targetUrl;
-    if (ALLOW_DYNAMIC_TARGET && targetParam) {
-      // URL 参数 target 为完整目标链接，直接使用
-      targetUrl = targetParam;
-    } else {
-      // 确定目标 base（Header 指定的是 base）
-      let targetBase = TARGET_BASE.replace(/\/+$/, "");
-      if (ALLOW_DYNAMIC_TARGET && headerTarget) {
-        targetBase = headerTarget.replace(/\/+$/, "");
-      }
-
-      // 从转发查询参数中移除代理专用的 target，避免泄露给目标服务
-      const forwardParams = new URLSearchParams(url.searchParams);
-      forwardParams.delete("target");
-      const forwardSearch = forwardParams.toString();
-
-      // 拼接目标 URL：保留原始路径和查询参数
-      targetUrl = targetBase + url.pathname.substring(PROXY_PREFIX.length) + (forwardSearch ? "?" + forwardSearch : "");
-    }
-
+    // 目标 URL：host 仅用于 Host 头 / SNI，路径与查询保留原样
+    const targetUrl = `${env.PROXY_ORIGIN}${url.pathname}${forwardSearch ? "?" + forwardSearch : ""}`;
     // 构造转发请求的 headers，去掉 hop-by-hop 和代理专用头
     const proxyHeaders = new Headers(request.headers);
     ["host", "x-proxy-target", "cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor", "cdn-loop"].forEach((h) => {
@@ -100,17 +135,27 @@ async function handleProxy(request, env, ctx) {
       if (ct) init.headers.set("Content-Type", ct);
     }
 
-    // 发起代理请求
-    const response = await fetch(targetUrl, init);
+    let response = null;
+    if(env.PROXY_VPC){
+      const binding = env[env.PROXY_VPC];
+      if (!binding) {
+        return new Response(`VPC binding ${env.PROXY_VPC} 未配置（见 wrangler.toml 的 vpc_services）`, { status: 501 });
+      }
+      // 通过 VPC Service 绑定发起代理请求（不能使用全局 fetch）
+      response = await binding.fetch(targetUrl, init);
+    }else{
+      response = fetch(targetUrl, init);
+    }
 
     // 原样透传目标响应（包括 400 / 502 等错误状态），仅在返回头追加 CORS
-    return withCORS(response);
+    return withCORS(response, url);
   } catch (err) {
     // fetch 抛出异常时，若异常本身携带响应，则原样返回该响应
     if (err && err.response instanceof Response) {
-      return withCORS(err.response);
+      return withCORS(err.response, new URL(request.url));
     }
-    return new Response(JSON.stringify({ error: err.message }), {
+
+    return new Response(err.message, {
       status: 502,
       headers: { "Content-Type": "application/json" },
     });
@@ -232,11 +277,15 @@ export class WebSocketHub {
   }
 }
 
-function withCORS(response) {
+function withCORS(response, workerUrl) {
   const respHeaders = new Headers(response.headers);
   respHeaders.set("Access-Control-Allow-Origin", "*");
   respHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS");
   respHeaders.set("Access-Control-Allow-Headers", "*");
+
+  if(env.FORCE_REWRITE){
+    rewriteLocation(respHeaders, workerUrl);
+  }
 
   // 无响应体的状态码（204/304 等）必须传 null
   const noBody = [101, 204, 205, 304].includes(response.status);
@@ -245,6 +294,24 @@ function withCORS(response) {
     statusText: response.statusText,
     headers: respHeaders,
   });
+}
+
+/**
+ * 若响应 Location 指向 TARGET_HOST，则把其 host 换成 worker 自身的 host，
+ * 避免客户端被重定向到无法访问的内网主机。
+ */
+function rewriteLocation(headers, workerUrl) {
+  const location = headers.get("Location");
+  if (!location || !workerUrl) return;
+
+  try {
+    const loc = new URL(location, workerUrl);
+    if (loc.hostname !== TARGET_HOST) return;
+    loc.host = workerUrl.host;
+    headers.set("Location", loc.toString());
+  } catch {
+    // Location 非法时保持原样
+  }
 }
 
 function handleCORS() {
