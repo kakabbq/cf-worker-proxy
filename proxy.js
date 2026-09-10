@@ -6,8 +6,10 @@
  *   部署后，访问 https://<your-worker>.workers.dev/<path>
  *   请求会被转发到 TARGET_BASE/<path>，并原样返回响应。
  *
- *   也可以在请求时通过 Header "x-proxy-target" 动态指定目标地址，
- *   例如：curl -H "x-proxy-target: https://api.example.com" https://<worker>.workers.dev/users
+ *   也可以通过 Header "x-proxy-target"（目标 base）或 URL 参数 "target"（完整目标链接）
+ *   动态指定目标地址，例如：
+ *     curl -H "x-proxy-target: https://api.example.com" https://<worker>.workers.dev/users
+ *     curl "https://<worker>.workers.dev/?target=https://api.example.com/users?page=1"
  */
 
 // ====== 配置 ======
@@ -30,16 +32,28 @@ export default {
 
     try {
       const url = new URL(request.url);
-      const dynamicTarget = request.headers.get("x-proxy-target");
+      const targetParam = url.searchParams.get("target");
+      const headerTarget = request.headers.get("x-proxy-target");
 
-      // 确定目标 base
-      let targetBase = TARGET_BASE.replace(/\/+$/, "");
-      if (ALLOW_DYNAMIC_TARGET && dynamicTarget) {
-        targetBase = dynamicTarget.replace(/\/+$/, "");
+      let targetUrl;
+      if (ALLOW_DYNAMIC_TARGET && targetParam) {
+        // URL 参数 target 为完整目标链接，直接使用
+        targetUrl = targetParam;
+      } else {
+        // 确定目标 base（Header 指定的是 base）
+        let targetBase = TARGET_BASE.replace(/\/+$/, "");
+        if (ALLOW_DYNAMIC_TARGET && headerTarget) {
+          targetBase = headerTarget.replace(/\/+$/, "");
+        }
+
+        // 从转发查询参数中移除代理专用的 target，避免泄露给目标服务
+        const forwardParams = new URLSearchParams(url.searchParams);
+        forwardParams.delete("target");
+        const forwardSearch = forwardParams.toString();
+
+        // 拼接目标 URL：保留原始路径和查询参数
+        targetUrl = targetBase + url.pathname + (forwardSearch ? "?" + forwardSearch : "");
       }
-
-      // 拼接目标 URL：保留原始路径和查询参数
-      const targetUrl = targetBase + url.pathname + url.search;
 
       // 构造转发请求的 headers，去掉 hop-by-hop 和代理专用头
       const proxyHeaders = new Headers(request.headers);
@@ -52,6 +66,7 @@ export default {
         method: request.method,
         headers: proxyHeaders,
         redirect: "follow",
+        timeout: 30000,
       };
 
       // 对有 body 的方法，透传请求体
