@@ -19,6 +19,7 @@
 
 // ====== 配置 ======
 const TARGET_BASE = "https://api.example.com"; // 默认代理目标（不含末尾斜杠）
+const PROXY_PREFIX = "/proxy";
 const ALLOW_DYNAMIC_TARGET = true; // 是否允许通过 Header 动态指定目标
 // ==================
 
@@ -31,81 +32,91 @@ export default {
       return handleWebSocket(request, env);
     }
 
-    // 只允许 GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS
-    const allowedMethods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
-    if (!allowedMethods.includes(request.method)) {
-      return new Response("Method Not Allowed", { status: 405 });
+    if(url.pathname.startsWith(PROXY_PREFIX)) {
+      return await handleProxy(request, env, ctx);
     }
 
-    // CORS 预检
-    if (request.method === "OPTIONS") {
-      return handleCORS();
-    }
-
-    try {
-      const targetParam = url.searchParams.get("target");
-      const headerTarget = request.headers.get("x-proxy-target");
-
-      let targetUrl;
-      if (ALLOW_DYNAMIC_TARGET && targetParam) {
-        // URL 参数 target 为完整目标链接，直接使用
-        targetUrl = targetParam;
-      } else {
-        // 确定目标 base（Header 指定的是 base）
-        let targetBase = TARGET_BASE.replace(/\/+$/, "");
-        if (ALLOW_DYNAMIC_TARGET && headerTarget) {
-          targetBase = headerTarget.replace(/\/+$/, "");
-        }
-
-        // 从转发查询参数中移除代理专用的 target，避免泄露给目标服务
-        const forwardParams = new URLSearchParams(url.searchParams);
-        forwardParams.delete("target");
-        const forwardSearch = forwardParams.toString();
-
-        // 拼接目标 URL：保留原始路径和查询参数
-        targetUrl = targetBase + url.pathname + (forwardSearch ? "?" + forwardSearch : "");
-      }
-
-      // 构造转发请求的 headers，去掉 hop-by-hop 和代理专用头
-      const proxyHeaders = new Headers(request.headers);
-      ["host", "x-proxy-target", "cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor", "cdn-loop"].forEach((h) => {
-        proxyHeaders.delete(h);
-      });
-
-      // 构造转发请求
-      const init = {
-        method: request.method,
-        headers: proxyHeaders,
-        redirect: "follow",
-        timeout: 30000,
-      };
-
-      // 对有 body 的方法，透传请求体
-      if (["POST", "PUT", "PATCH"].includes(request.method)) {
-        init.body = request.body;
-        // 保留原始 Content-Type
-        const ct = request.headers.get("Content-Type");
-        if (ct) init.headers.set("Content-Type", ct);
-      }
-
-      // 发起代理请求
-      const response = await fetch(targetUrl, init);
-
-      // 原样透传目标响应（包括 400 / 502 等错误状态），仅在返回头追加 CORS
-      return withCORS(response);
-    } catch (err) {
-      // fetch 抛出异常时，若异常本身携带响应，则原样返回该响应
-      if (err && err.response instanceof Response) {
-        return withCORS(err.response);
-      }
-      return new Response(JSON.stringify({ error: err.message }), {
-        status: 502,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+    return new Response("", {
+      status: 404,
+    });
   },
 };
 
+async function handleProxy(request, env, ctx) {
+  // 只允许 GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS
+  const allowedMethods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+  if (!allowedMethods.includes(request.method)) {
+    return new Response("Method Not Allowed", { status: 405 });
+  }
+
+  // CORS 预检
+  if (request.method === "OPTIONS") {
+    return handleCORS();
+  }
+
+  try {
+    const url = new URL(request.url);
+    const targetParam = url.searchParams.get("target");
+    const headerTarget = request.headers.get("x-proxy-target");
+
+    let targetUrl;
+    if (ALLOW_DYNAMIC_TARGET && targetParam) {
+      // URL 参数 target 为完整目标链接，直接使用
+      targetUrl = targetParam;
+    } else {
+      // 确定目标 base（Header 指定的是 base）
+      let targetBase = TARGET_BASE.replace(/\/+$/, "");
+      if (ALLOW_DYNAMIC_TARGET && headerTarget) {
+        targetBase = headerTarget.replace(/\/+$/, "");
+      }
+
+      // 从转发查询参数中移除代理专用的 target，避免泄露给目标服务
+      const forwardParams = new URLSearchParams(url.searchParams);
+      forwardParams.delete("target");
+      const forwardSearch = forwardParams.toString();
+
+      // 拼接目标 URL：保留原始路径和查询参数
+      targetUrl = targetBase + url.pathname.substring(PROXY_PREFIX.length) + (forwardSearch ? "?" + forwardSearch : "");
+    }
+
+    // 构造转发请求的 headers，去掉 hop-by-hop 和代理专用头
+    const proxyHeaders = new Headers(request.headers);
+    ["host", "x-proxy-target", "cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor", "cdn-loop"].forEach((h) => {
+      proxyHeaders.delete(h);
+    });
+
+    // 构造转发请求
+    const init = {
+      method: request.method,
+      headers: proxyHeaders,
+      redirect: "follow",
+      timeout: 30000,
+    };
+
+    // 对有 body 的方法，透传请求体
+    if (["POST", "PUT", "PATCH"].includes(request.method)) {
+      init.body = request.body;
+      // 保留原始 Content-Type
+      const ct = request.headers.get("Content-Type");
+      if (ct) init.headers.set("Content-Type", ct);
+    }
+
+    // 发起代理请求
+    const response = await fetch(targetUrl, init);
+
+    // 原样透传目标响应（包括 400 / 502 等错误状态），仅在返回头追加 CORS
+    return withCORS(response);
+  } catch (err) {
+    // fetch 抛出异常时，若异常本身携带响应，则原样返回该响应
+    if (err && err.response instanceof Response) {
+      return withCORS(err.response);
+    }
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 502,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+}
 /**
  * 将 WebSocket 升级请求转发到全局 Durable Object 完成订阅与分发。
  */
