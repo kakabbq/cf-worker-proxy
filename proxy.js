@@ -18,8 +18,8 @@
  */
 
 // ====== 配置 ======
-const TARGET_BASE = "https://api.example.com"; // 默认代理目标（不含末尾斜杠）
-const PROXY_PREFIX = "/proxy";
+const TARGET_BASE = "https://www.baidu.com"; // 默认代理目标（不含末尾斜杠）
+const PROXY_PREFIX = "";
 const ALLOW_DYNAMIC_TARGET = true; // 是否允许通过 Header 动态指定目标
 // ==================
 
@@ -89,8 +89,7 @@ async function handleProxy(request, env, ctx) {
     const init = {
       method: request.method,
       headers: proxyHeaders,
-      redirect: "follow",
-      timeout: 30000,
+      redirect: "manual",
     };
 
     // 对有 body 的方法，透传请求体
