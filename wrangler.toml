@@ -1,5 +1,10 @@
 name = "request-proxy"
 main = "proxy.js"
 compatibility_date = "2026-05-03"
+
+# 静态资源目录：命中 public/ 下的文件时直接返回，未命中才走 Worker 代理
+[assets]
+directory = "./public"
+binding = "ASSETS"
 # 部署： npx wrangler deploy
 # 本地调试： npx wrangler dev
