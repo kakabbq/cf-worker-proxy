@@ -29,7 +29,7 @@ export default {
     }
 
     if (url.pathname === "/proxy") {
-      return await handleProxyUrl(request, env,ctx);
+      return await handleProxyUrl(request, env, ctx);
     }
 
     if(env.PROXY_ORIGIN) {
@@ -81,11 +81,11 @@ async function handleProxyUrl(request, env, ctx) {
     const response = await fetch(targetUrl, init);
 
     // 原样透传目标响应（包括 400 / 502 等错误状态），仅在返回头追加 CORS
-    return withCORS(response, url);
+    return withCORS(response, url, env);
   } catch (err) {
     // fetch 抛出异常时，若异常本身携带响应，则原样返回该响应
     if (err && err.response instanceof Response) {
-      return withCORS(err.response, url);
+      return withCORS(err.response, url, env);
     }
     return new Response(JSON.stringify({ error: err.message }), {
       status: 502,
@@ -150,11 +150,11 @@ async function handleProxy(request, env, ctx) {
     }
 
     // 原样透传目标响应（包括 400 / 502 等错误状态），仅在返回头追加 CORS
-    return withCORS(response, url);
+    return withCORS(response, url, env);
   } catch (err) {
     // fetch 抛出异常时，若异常本身携带响应，则原样返回该响应
     if (err && err.response instanceof Response) {
-      return withCORS(err.response, new URL(request.url));
+      return withCORS(err.response, new URL(request.url), env);
     }
 
     return new Response(err.message, {
@@ -279,7 +279,7 @@ export class WebSocketHub {
   }
 }
 
-function withCORS(response, workerUrl) {
+function withCORS(response, workerUrl, env) {
   const respHeaders = new Headers(response.headers);
   respHeaders.set("Access-Control-Allow-Origin", "*");
   respHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS");
