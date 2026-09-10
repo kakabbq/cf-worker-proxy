@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WebSocket Hub 调试客户端</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --border: #2a2f3a;
+      --text: #e6e9ef;
+      --muted: #8b93a7;
+      --accent: #4f8cff;
+      --ok: #37d67a;
+      --warn: #ffb020;
+      --err: #ff5c5c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 14px;
+    }
+    h1 { font-size: 18px; margin: 0 0 16px; }
+    .wrap { max-width: 900px; margin: 0 auto; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    label { display: block; color: var(--muted); margin-bottom: 6px; font-size: 12px; }
+    input, textarea, select {
+      width: 100%;
+      background: #0d0f13;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 10px;
+      font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      outline: none;
+    }
+    input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+    .row { display: flex; gap: 12px; }
+    .row > .col { flex: 1; }
+    .row + .row { margin-top: 12px; }
+    button {
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: #222734;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 9px 16px;
+      font-size: 13px;
+      transition: background .15s, border-color .15s;
+    }
+    button:hover { background: #2b3140; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.primary:hover { background: #3d7bff; }
+    button.danger { background: #3a2020; border-color: #5a2a2a; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .actions { display: flex; gap: 10px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
+    .status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+    .dot.connected { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+    .dot.connecting { background: var(--warn); }
+    .dot.closed { background: var(--err); }
+    #log {
+      height: 340px;
+      overflow-y: auto;
+      background: #0b0d11;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-line { margin-bottom: 2px; }
+    .log-time { color: #5a6478; margin-right: 8px; }
+    .log-sys { color: var(--muted); }
+    .log-sent { color: var(--accent); }
+    .log-recv { color: var(--ok); }
+    .log-err { color: var(--err); }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>WebSocket Hub 调试客户端</h1>
+
+    <div class="panel">
+      <div class="row">
+        <div class="col">
+          <label>服务地址（留空使用当前站点）</label>
+          <input id="host" placeholder="例如 wss://request-proxy.xxx.workers.dev" />
+        </div>
+        <div class="col">
+          <label>订阅 Topic（逗号分隔）</label>
+          <input id="topics" value="system,user" />
+        </div>
+      </div>
+      <div class="actions">
+        <button id="connect" class="primary">连接</button>
+        <button id="disconnect" class="danger" disabled>断开</button>
+        <span class="status"><span id="dot" class="dot"></span><span id="statusText">未连接</span></span>
+      </div>
+      <div class="hint">连接地址：<code id="urlPreview"></code></div>
+    </div>
+
+    <div class="panel">
+      <div class="row">
+        <div class="col" style="max-width:220px">
+          <label>发送到 Topic</label>
+          <input id="sendTopic" value="system" />
+        </div>
+        <div class="col">
+          <label>数据（JSON 或纯文本）</label>
+          <input id="sendData" value='{"msg":"hello"}' />
+        </div>
+      </div>
+      <div class="actions">
+        <button id="send" class="primary" disabled>发送</button>
+        <label style="display:inline-flex;align-items:center;gap:6px;margin:0;color:var(--text)">
+          <input id="echo" type="checkbox" style="width:auto" /> 回发给自己 (echo)
+        </label>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="actions" style="justify-content:space-between">
+        <strong>消息日志</strong>
+        <button id="clear">清空</button>
+      </div>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const defaultHost = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+    let ws = null;
+
+    $("host").placeholder = defaultHost;
+
+    function buildUrl() {
+      const host = ($("host").value.trim() || defaultHost).replace(/\/+$/, "");
+      const topics = encodeURIComponent($("topics").value.trim());
+      return host + "/ws?topics=" + topics;
+    }
+
+    function updatePreview() {
+      $("urlPreview").textContent = buildUrl();
+    }
+    $("host").addEventListener("input", updatePreview);
+    $("topics").addEventListener("input", updatePreview);
+    updatePreview();
+
+    function setStatus(state, text) {
+      $("dot").className = "dot " + state;
+      $("statusText").textContent = text;
+      const connected = state === "connected";
+      $("connect").disabled = connected || state === "connecting";
+      $("disconnect").disabled = !connected;
+      $("send").disabled = !connected;
+    }
+
+    function log(kind, text) {
+      const line = document.createElement("div");
+      line.className = "log-line log-" + kind;
+      const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      const timeEl = document.createElement("span");
+      timeEl.className = "log-time";
+      timeEl.textContent = time;
+      line.appendChild(timeEl);
+      line.appendChild(document.createTextNode(text));
+      const box = $("log");
+      box.appendChild(line);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    $("connect").addEventListener("click", () => {
+      const url = buildUrl();
+      log("sys", "连接中 " + url);
+      setStatus("connecting", "连接中…");
+      try {
+        ws = new WebSocket(url);
+      } catch (e) {
+        log("err", "创建 WebSocket 失败: " + e.message);
+        setStatus("closed", "连接失败");
+        return;
+      }
+      ws.onopen = () => {
+        setStatus("connected", "已连接");
+        log("sys", "已连接，订阅 topics=" + $("topics").value.trim());
+      };
+      ws.onmessage = (e) => log("recv", "← " + e.data);
+      ws.onerror = () => log("err", "连接错误");
+      ws.onclose = (e) => {
+        setStatus("closed", "已断开");
+        log("sys", "连接关闭 (code=" + e.code + (e.reason ? ", reason=" + e.reason : "") + ")");
+        ws = null;
+      };
+    });
+
+    $("disconnect").addEventListener("click", () => {
+      if (ws) ws.close(1000, "client disconnect");
+    });
+
+    $("send").addEventListener("click", () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const topic = $("sendTopic").value.trim();
+      const raw = $("sendData").value;
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = raw;
+      }
+      const payload = { topic, data, echo: $("echo").checked };
+      ws.send(JSON.stringify(payload));
+      log("sent", "→ " + JSON.stringify(payload));
+    });
+
+    $("clear").addEventListener("click", () => {
+      $("log").innerHTML = "";
+    });
+  </script>
+</body>
+</html>

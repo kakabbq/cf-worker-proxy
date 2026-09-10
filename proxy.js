@@ -10,6 +10,11 @@
  *   动态指定目标地址，例如：
  *     curl -H "x-proxy-target: https://api.example.com" https://<worker>.workers.dev/users
  *     curl "https://<worker>.workers.dev/?target=https://api.example.com/users?page=1"
+ *
+ * WebSocket 分发端点：
+ *   连接 wss://<worker>.workers.dev/ws?topics=system,user 即可订阅一个或多个 topic。
+ *   客户端发送 JSON 消息 { "topic": "system", "data": ... }，
+ *   该消息会被分发给所有订阅了 "system" 的连接（默认不回发给发送者，可用 echo 控制）。
  */
 
 // ====== 配置 ======
@@ -19,6 +24,13 @@ const ALLOW_DYNAMIC_TARGET = true; // 是否允许通过 Header 动态指定目�
 
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // WebSocket 分发端点：/ws?topics=system,user
+    if (url.pathname === "/ws") {
+      return handleWebSocket(request, env);
+    }
+
     // 只允许 GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS
     const allowedMethods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     if (!allowedMethods.includes(request.method)) {
@@ -31,7 +43,6 @@ export default {
     }
 
     try {
-      const url = new URL(request.url);
       const targetParam = url.searchParams.get("target");
       const headerTarget = request.headers.get("x-proxy-target");
 
@@ -94,6 +105,122 @@ export default {
     }
   },
 };
+
+/**
+ * 将 WebSocket 升级请求转发到全局 Durable Object 完成订阅与分发。
+ */
+function handleWebSocket(request, env) {
+  const upgrade = request.headers.get("Upgrade");
+  if (!upgrade || upgrade.toLowerCase() !== "websocket") {
+    return new Response("Expected WebSocket upgrade", { status: 426 });
+  }
+  if (!env.WS_HUB) {
+    return new Response("WebSocket hub 未配置（缺少 WS_HUB Durable Object 绑定）", { status: 501 });
+  }
+
+  // 所有连接共用一个 Hub，便于对同一 topic 的连接做全局分发
+  const id = env.WS_HUB.idFromName("global");
+  return env.WS_HUB.get(id).fetch(request);
+}
+
+/**
+ * 全局 WebSocket Hub：维护 topic -> 连接集合，并把发布的消息分发给同 topic 的订阅者。
+ * 使用 Durable Object 的 WebSocket Hibernation，空闲时不会持续计费。
+ */
+export class WebSocketHub {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.topics = new Map();
+    // DO 从休眠中恢复时内存 Map 会丢失，需根据已接受的连接重建订阅关系
+    this.rebuild();
+  }
+
+  rebuild() {
+    this.topics = new Map();
+    for (const ws of this.state.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() || {};
+      for (const topic of attachment.topics || []) {
+        this.subscribe(topic, ws);
+      }
+    }
+  }
+
+  subscribe(topic, ws) {
+    let subscribers = this.topics.get(topic);
+    if (!subscribers) {
+      subscribers = new Set();
+      this.topics.set(topic, subscribers);
+    }
+    subscribers.add(ws);
+  }
+
+  unsubscribe(ws) {
+    for (const [topic, subscribers] of this.topics) {
+      subscribers.delete(ws);
+      if (subscribers.size === 0) this.topics.delete(topic);
+    }
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const topics = (url.searchParams.get("topics") || "")
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    this.state.acceptWebSocket(server);
+    server.serializeAttachment({ topics });
+    for (const topic of topics) {
+      this.subscribe(topic, server);
+    }
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  webSocketMessage(ws, message) {
+    let msg;
+    try {
+      msg = JSON.parse(message);
+    } catch {
+      return;
+    }
+    if (!msg || typeof msg !== "object") return;
+
+    const topic = msg.topic || msg.channel;
+    if (!topic) return;
+
+    const subscribers = this.topics.get(topic);
+    if (!subscribers || subscribers.size === 0) return;
+
+    const payload = JSON.stringify({
+      topic,
+      data: msg.data !== undefined ? msg.data : msg.payload,
+      ts: Date.now(),
+    });
+
+    const echo = msg.echo === true;
+    for (const subscriber of subscribers) {
+      if (subscriber === ws && !echo) continue;
+      try {
+        subscriber.send(payload);
+      } catch {
+        this.unsubscribe(subscriber);
+      }
+    }
+  }
+
+  webSocketClose(ws) {
+    this.unsubscribe(ws);
+  }
+
+  webSocketError(ws) {
+    this.unsubscribe(ws);
+  }
+}
 
 function withCORS(response) {
   const respHeaders = new Headers(response.headers);
