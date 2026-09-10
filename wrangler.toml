@@ -22,14 +22,10 @@ class_name = "WebSocketHub"
 tag = "v1"
 new_sqlite_classes = ["WebSocketHub"]
 
-[var]
+[vars]
 DEBUG_MODE = 0
 FORCE_REWRITE = 0
+# 标识 PROXY_ORIGIN 所代理的站点是那个VNC服务，如果为空则是外部站点
 PROXY_VPC = "VPC_ARMBIAN"
 PROXY_ORIGIN = "http://armbian"
 
-
-
-
-# 部署： npx wrangler deploy
-# 本地调试： npx wrangler dev

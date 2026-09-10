@@ -15,6 +15,8 @@
  * 单请求代理 转发端点：
  *   连接 https://<worker>.workers.dev/proxy?target=https://www.xx.com?aa=1。
  *
+ * 站点代理 转发端点：
+ *   连接 https://<worker>.workers.dev/a/b => `${env.PROXY_ORIGIN}/a/b`
  */
 
 export default {
