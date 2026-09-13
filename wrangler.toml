@@ -9,8 +9,8 @@ binding = "ASSETS"
 
 # Workers VPC：绑定私有网络中的 home-mac 服务
 [[vpc_services]]
-binding = "VPC_ARMBIAN"
-service_id = "01a08cb1-20d4-7ab3-909d-3fda4dbd0840"
+binding = "VPC_API_SERVICE"
+service_id = "01a09c3d-cf8a-7121-96ce-dd3bffde55ea"
 remote = true
 
 # WebSocket 分发用 Durable Object
@@ -26,6 +26,6 @@ new_sqlite_classes = ["WebSocketHub"]
 DEBUG_MODE = 0
 FORCE_REWRITE = 0
 # 标识 PROXY_ORIGIN 所代理的站点是那个VNC服务，如果为空则是外部站点
-PROXY_VPC = "VPC_ARMBIAN"
+PROXY_VPC = "VPC_API_SERVICE"
 PROXY_ORIGIN = "http://armbian"
 
