@@ -154,7 +154,7 @@
     function buildUrl() {
       const host = ($("host").value.trim() || defaultHost).replace(/\/+$/, "");
       const topics = encodeURIComponent($("topics").value.trim());
-      return host + "/ws?topics=" + topics;
+      return host + "/worker-ws?topics=" + topics;
     }
 
     function updatePreview() {

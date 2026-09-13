@@ -8,7 +8,7 @@
  *   请求会被转发到 home-mac 服务的 <path>，并原样返回响应。
  *
  * WebSocket 分发端点：
- *   连接 wss://<worker>.workers.dev/ws?topics=system,user 即可订阅一个或多个 topic。
+ *   连接 wss://<worker>.workers.dev/worker-ws?topics=system,user 即可订阅一个或多个 topic。
  *   客户端发送 JSON 消息 { "topic": "system", "data": ... }，
  *   该消息会被分发给所有订阅了 "system" 的连接（默认不回发给发送者，可用 echo 控制）。
  *
@@ -23,10 +23,11 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // WebSocket 分发端点：/ws?topics=system,user
-    if (url.pathname === "/ws") {
+    // WebSocket 分发端点：/worker-ws?topics=system,user
+    if (url.pathname === "/worker-ws") {
       return handleWebSocket(request, env);
     }
+
 
     if (url.pathname === "/proxy") {
       return await handleProxyUrl(request, env, ctx);
@@ -41,6 +42,50 @@ export default {
     });
   },
 };
+
+async function handleProxyWebSocket(request, env, ctx) {
+  const url = new URL(request.url);
+
+  // 1. 只处理目标路径的 WebSocket 升级请求
+  if (url.pathname !== '/somewhere1' || request.headers.get('Upgrade') !== 'websocket') {
+    return new Response('Not Found', {status: 404});
+  }
+
+  // 2. 创建 WebSocket 对，获取客户端和服务器端
+  const [client, server] = Object.values(new WebSocketPair());
+  server.accept();
+
+  // 3. 作为客户端连接到远程 WebSocket 服务器
+  // 注意：Cloudflare Worker 的环境支持 new WebSocket(url) [citation:1]
+  const remoteUrl = 'ws://somedomain/somewhere2';
+  const remote = new WebSocket(remoteUrl);
+  remote.accept();
+
+  // 4. 双向管道转发消息
+  // 客户端 -> 远程
+  server.addEventListener('message', (event) => {
+    if (remote.readyState === WebSocket.OPEN) {
+      remote.send(event.data);
+    }
+  });
+
+  // 远程 -> 客户端
+  remote.addEventListener('message', (event) => {
+    if (server.readyState === WebSocket.OPEN) {
+      server.send(event.data);
+    }
+  });
+
+  // 5. 处理连接关闭
+  server.addEventListener('close', () => remote.close());
+  remote.addEventListener('close', () => server.close());
+
+  // 6. 返回 101 Switching Protocols 响应，将客户端 WebSocket 交还给请求者
+  return new Response(null, {
+    status: 101,
+    webSocket: client,
+  });
+}
 
 async function handleProxyUrl(request, env, ctx) {
   // 只允许 GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS
@@ -105,6 +150,10 @@ async function handleProxy(request, env, ctx) {
   // CORS 预检
   if (request.method === "OPTIONS") {
     return handleCORS();
+  }
+
+  if (request.headers.get('Upgrade') === 'websocket') {
+    return handleProxyWebSocket(request, env, ctx);
   }
 
   const url = new URL(request.url);
