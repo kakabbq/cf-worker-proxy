@@ -69,6 +69,8 @@ async function handleProxyWebSocket(request, env, ctx) {
   // 客户端 -> 远程
   server.addEventListener('message', (event) => {
     if (remote.readyState === WebSocket.OPEN) {
+      console.log("cc",event.data)
+
       remote.send(event.data);
     }
   });
@@ -76,6 +78,7 @@ async function handleProxyWebSocket(request, env, ctx) {
   // 远程 -> 客户端
   remote.addEventListener('message', (event) => {
     if (server.readyState === WebSocket.OPEN) {
+      console.log("dd",event.data)
       server.send(event.data);
     }
   });
@@ -86,8 +89,8 @@ async function handleProxyWebSocket(request, env, ctx) {
 
   // 6. 返回 101 Switching Protocols 响应，将客户端 WebSocket 交还给请求者
   return new Response(null, {
-    status: 101,
-    webSocket: client,
+     status: 101,
+     webSocket: client,
   });
 }
 

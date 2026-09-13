@@ -27,5 +27,5 @@ DEBUG_MODE = 0
 FORCE_REWRITE = 0
 # 标识 PROXY_ORIGIN 所代理的站点是那个VNC服务，如果为空则是外部站点
 PROXY_VPC = "VPC_API_SERVICE"
-PROXY_ORIGIN = "http://armbian"
+PROXY_ORIGIN = "http://debian-wifi"
 
