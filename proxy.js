@@ -45,19 +45,23 @@ export default {
 
 async function handleProxyWebSocket(request, env, ctx) {
   const url = new URL(request.url);
-
   // 1. 只处理目标路径的 WebSocket 升级请求
-  if (url.pathname !== '/somewhere1' || request.headers.get('Upgrade') !== 'websocket') {
+  if (request.headers.get('Upgrade') !== 'websocket') {
     return new Response('Not Found', {status: 404});
   }
 
+  const forwardParams = new URLSearchParams(url.searchParams);
+  forwardParams.delete("target");
+  const forwardSearch = forwardParams.toString();
+
+  const wsProtocol = env.PROXY_ORIGIN.startsWith('https') ? 'wss' : 'ws';
+  const wsBaseUrl = wsProtocol + '://' . env.PROXY_ORIGIN.split('://')[1];
+  // 3. 作为客户端连接到远程 WebSocket 服务器
+  // 注意：Cloudflare Worker 的环境支持 new WebSocket(url) [citation:1]
+  const remoteUrl = wsBaseUrl + url.pathname + (forwardSearch ? "?" + forwardSearch : "");
   // 2. 创建 WebSocket 对，获取客户端和服务器端
   const [client, server] = Object.values(new WebSocketPair());
   server.accept();
-
-  // 3. 作为客户端连接到远程 WebSocket 服务器
-  // 注意：Cloudflare Worker 的环境支持 new WebSocket(url) [citation:1]
-  const remoteUrl = 'ws://somedomain/somewhere2';
   const remote = new WebSocket(remoteUrl);
   remote.accept();
 
