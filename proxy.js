@@ -44,12 +44,123 @@ export default {
 };
 
 async function handleProxyWebSocket(request, env, ctx) {
+  // 1. 验证请求是否为 WebSocket 升级请求
+  if (request.headers.get('Upgrade') !== 'websocket') {
+    return new Response('Expected WebSocket connection', {status: 400});
+  }
+
+  // 2. 从请求 URL 中解析出目标 WebSocket 地址
   const url = new URL(request.url);
+  const forwardParams = new URLSearchParams(url.searchParams);
+  forwardParams.delete("target");
+  const forwardSearch = forwardParams.toString();
+
+  const wsProtocol = env.PROXY_ORIGIN.startsWith('https') ? 'wss' : 'ws';
+  const wsBaseUrl = wsProtocol + '://' . env.PROXY_ORIGIN.split('://')[1];
+  // 3. 作为客户端连接到远程 WebSocket 服务器
+  // 注意：Cloudflare Worker 的环境支持 new WebSocket(url) [citation:1]
+  const targetUrl = wsBaseUrl + url.pathname + (forwardSearch ? "?" + forwardSearch : "");
+
+  // 3. 创建客户端与 Worker 之间的 WebSocket 连接
+  const [client, proxy] = new WebSocketPair();
+  // 关键：启用 allowHalfOpen，以便手动协调关闭，避免连接被意外提前切断
+  proxy.accept({allowHalfOpen: true});
+
+  // 4. 用于暂存目标连接建立前收到的客户端消息
+  let pendingMessages = [];
+  let targetWebSocket = null;
+
+  // 5. 异步连接目标服务器
+  const connectTarget = new Promise((resolve, reject) => {
+    try {
+      targetWebSocket = new WebSocket(targetUrl);
+    } catch (e) {
+      reject(e);
+      return;
+    }
+
+    targetWebSocket.addEventListener('open', () => {
+      console.log('已连接到目标服务器:', targetUrl);
+      // 连接成功后，发送暂存的消息
+      pendingMessages.forEach(msg => {
+        if (targetWebSocket.readyState === WebSocket.OPEN) {
+          targetWebSocket.send(msg);
+        }
+      });
+      pendingMessages = [];
+      resolve(targetWebSocket);
+    });
+
+    targetWebSocket.addEventListener('error', (err) => {
+      console.error('目标连接错误:', err);
+      reject(err);
+    });
+  });
+
+  // 6. 处理从客户端发来的消息
+  proxy.addEventListener('message', async (event) => {
+    try {
+      await connectTarget; // 等待目标连接就绪
+      if (targetWebSocket && targetWebSocket.readyState === WebSocket.OPEN) {
+        targetWebSocket.send(event.data);
+      }
+    } catch (e) {
+      // 如果目标连接失败，暂存消息（或直接丢弃，视需求而定）
+      console.log('目标未就绪，暂存消息');
+      pendingMessages.push(event.data);
+    }
+  });
+
+  // 7. 连接目标成功后，处理从目标返回的消息，转发给客户端
+  // 注意：这里需要等待 targetWebSocket 实例创建，所以放在 Promise 外部处理可能更简单。
+  // 更稳妥的方式是在 connectTarget 的 then 中处理。
+  connectTarget.then((targetWs) => {
+    targetWs.addEventListener('message', (event) => {
+      if (proxy.readyState === WebSocket.OPEN) {
+        proxy.send(event.data);
+      }
+    });
+
+    // 8. 协调关闭：目标端关闭时，通知客户端
+    targetWs.addEventListener('close', (event) => {
+      console.log('目标连接关闭:', event.code, event.reason);
+      if (proxy.readyState === WebSocket.OPEN || proxy.readyState === WebSocket.CLOSING) {
+        proxy.close(event.code, event.reason);
+      }
+    });
+
+    targetWs.addEventListener('error', (err) => {
+      console.error('目标WebSocket错误:', err);
+      if (proxy.readyState === WebSocket.OPEN) {
+        proxy.close(1011, 'Target connection error');
+      }
+    });
+  }).catch((err) => {
+    console.error('无法建立目标连接:', err);
+    // 如果目标连接彻底失败，关闭客户端连接
+    proxy.close(1011, 'Failed to connect to target');
+  });
+
+  // 9. 协调关闭：客户端关闭时，通知目标端
+  proxy.addEventListener('close', (event) => {
+    console.log('客户端连接关闭:', event.code, event.reason);
+    if (targetWebSocket && targetWebSocket.readyState === WebSocket.OPEN) {
+      targetWebSocket.close(event.code, event.reason);
+    }
+  });
+
+  // 10. 返回 101 响应，将 client 端交给客户端
+  return new Response(null, {
+    status: 101,
+    webSocket: client,
+  });
+}
+async function handleProxyWebSocket2(request, env, ctx) {
   // 1. 只处理目标路径的 WebSocket 升级请求
   if (request.headers.get('Upgrade') !== 'websocket') {
     return new Response('Not Found', {status: 404});
   }
-
+  const url = new URL(request.url);
   const forwardParams = new URLSearchParams(url.searchParams);
   forwardParams.delete("target");
   const forwardSearch = forwardParams.toString();
@@ -160,7 +271,7 @@ async function handleProxy(request, env, ctx) {
   }
 
   if (request.headers.get('Upgrade') === 'websocket') {
-    return handleProxyWebSocket(request, env, ctx);
+    return await handleProxyWebSocket(request, env, ctx);
   }
 
   const url = new URL(request.url);
