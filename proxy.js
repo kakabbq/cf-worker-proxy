@@ -44,164 +44,79 @@ export default {
 };
 
 async function handleProxyWebSocket(request, env, ctx) {
-  // 1. 验证请求是否为 WebSocket 升级请求
-  if (request.headers.get('Upgrade') !== 'websocket') {
-    return new Response('Expected WebSocket connection', {status: 400});
+  // 1. 检查是否为 WebSocket 升级请求
+  const upgradeHeader = request.headers.get("upgrade");
+  if (upgradeHeader.toLowerCase() !== "websocket") {
+    return new Response("Expected WebSocket", {status: 426});
   }
-
-  // 2. 从请求 URL 中解析出目标 WebSocket 地址
   const url = new URL(request.url);
   const forwardParams = new URLSearchParams(url.searchParams);
   forwardParams.delete("target");
   const forwardSearch = forwardParams.toString();
 
-  const wsProtocol = env.PROXY_ORIGIN.startsWith('https') ? 'wss' : 'ws';
-  const wsBaseUrl = wsProtocol + '://' . env.PROXY_ORIGIN.split('://')[1];
-  // 3. 作为客户端连接到远程 WebSocket 服务器
-  // 注意：Cloudflare Worker 的环境支持 new WebSocket(url) [citation:1]
-  const targetUrl = wsBaseUrl + url.pathname + (forwardSearch ? "?" + forwardSearch : "");
-
-  // 3. 创建客户端与 Worker 之间的 WebSocket 连接
-  const [client, proxy] = new WebSocketPair();
-  // 关键：启用 allowHalfOpen，以便手动协调关闭，避免连接被意外提前切断
-  proxy.accept({allowHalfOpen: true});
-
-  // 4. 用于暂存目标连接建立前收到的客户端消息
-  let pendingMessages = [];
-  let targetWebSocket = null;
-
-  // 5. 异步连接目标服务器
-  const connectTarget = new Promise((resolve, reject) => {
-    try {
-      targetWebSocket = new WebSocket(targetUrl);
-    } catch (e) {
-      reject(e);
-      return;
+  // 目标 URL：host 仅用于 Host 头 / SNI，路径与查询保留原样
+  const upstreamUrl = `${env.PROXY_ORIGIN}${url.pathname}${forwardSearch ? "?" + forwardSearch : ""}`;
+  const init = {
+    headers: {
+      // connection: "Upgrade",
+      upgrade: "websocket",
+      // 可以透传客户端的子协议等头
+      "sec-webSocket-protocol": request.headers.get("Sec-WebSocket-Protocol") || "",
     }
-
-    targetWebSocket.addEventListener('open', () => {
-      console.log('已连接到目标服务器:', targetUrl);
-      // 连接成功后，发送暂存的消息
-      pendingMessages.forEach(msg => {
-        if (targetWebSocket.readyState === WebSocket.OPEN) {
-          targetWebSocket.send(msg);
-        }
-      });
-      pendingMessages = [];
-      resolve(targetWebSocket);
-    });
-
-    targetWebSocket.addEventListener('error', (err) => {
-      console.error('目标连接错误:', err);
-      reject(err);
-    });
-  });
-
-  // 6. 处理从客户端发来的消息
-  proxy.addEventListener('message', async (event) => {
-    try {
-      await connectTarget; // 等待目标连接就绪
-      if (targetWebSocket && targetWebSocket.readyState === WebSocket.OPEN) {
-        targetWebSocket.send(event.data);
-      }
-    } catch (e) {
-      // 如果目标连接失败，暂存消息（或直接丢弃，视需求而定）
-      console.log('目标未就绪，暂存消息');
-      pendingMessages.push(event.data);
+  }
+  let upstreamResponse = null;
+  if(env.PROXY_VPC){
+    const binding = env[env.PROXY_VPC];
+    if (!binding) {
+      return new Response(`VPC binding ${env.PROXY_VPC} 未配置（见 wrangler.toml 的 vpc_services）`, { status: 501 });
     }
+    // 通过 VPC Service 绑定发起代理请求（不能使用全局 fetch）
+    upstreamResponse = await binding.fetch(upstreamUrl, init);
+  }else{
+    upstreamResponse = fetch(upstreamUrl, init);
+  }
+
+  // 检查上游是否成功升级
+  if (!upstreamResponse.webSocket) {
+    return new Response("Upstream WebSocket upgrade failed", {status: 502});
+  }
+
+  const upstreamWs = upstreamResponse.webSocket;
+  upstreamWs.accept(); // 接受上游连接
+  // 4. 创建面向客户端的 WebSocket 对
+  const pair = new WebSocketPair();
+  const [clientWs, serverWs] = Object.values(pair);
+  serverWs.accept();
+  // 5. 客户端 → 上游：转发消息
+  serverWs.addEventListener("message", (event) => {
+    upstreamWs.send(event.data);
   });
 
-  // 7. 连接目标成功后，处理从目标返回的消息，转发给客户端
-  // 注意：这里需要等待 targetWebSocket 实例创建，所以放在 Promise 外部处理可能更简单。
-  // 更稳妥的方式是在 connectTarget 的 then 中处理。
-  connectTarget.then((targetWs) => {
-    targetWs.addEventListener('message', (event) => {
-      if (proxy.readyState === WebSocket.OPEN) {
-        proxy.send(event.data);
-      }
-    });
-
-    // 8. 协调关闭：目标端关闭时，通知客户端
-    targetWs.addEventListener('close', (event) => {
-      console.log('目标连接关闭:', event.code, event.reason);
-      if (proxy.readyState === WebSocket.OPEN || proxy.readyState === WebSocket.CLOSING) {
-        proxy.close(event.code, event.reason);
-      }
-    });
-
-    targetWs.addEventListener('error', (err) => {
-      console.error('目标WebSocket错误:', err);
-      if (proxy.readyState === WebSocket.OPEN) {
-        proxy.close(1011, 'Target connection error');
-      }
-    });
-  }).catch((err) => {
-    console.error('无法建立目标连接:', err);
-    // 如果目标连接彻底失败，关闭客户端连接
-    proxy.close(1011, 'Failed to connect to target');
+  // 6. 上游 → 客户端：转发消息
+  upstreamWs.addEventListener("message", (event) => {
+    serverWs.send(event.data);
   });
 
-  // 9. 协调关闭：客户端关闭时，通知目标端
-  proxy.addEventListener('close', (event) => {
-    console.log('客户端连接关闭:', event.code, event.reason);
-    if (targetWebSocket && targetWebSocket.readyState === WebSocket.OPEN) {
-      targetWebSocket.close(event.code, event.reason);
-    }
+  // 7. 处理关闭事件（双向关闭）
+  serverWs.addEventListener("close", (e) => {
+    upstreamWs.close(e.code, e.reason);
+  });
+  upstreamWs.addEventListener("close", (e) => {
+    serverWs.close(e.code, e.reason);
   });
 
-  // 10. 返回 101 响应，将 client 端交给客户端
+  // 8. 处理错误事件
+  serverWs.addEventListener("error", () => {
+    upstreamWs.close(1011, "Client error");
+  });
+  upstreamWs.addEventListener("error", () => {
+    serverWs.close(1011, "Upstream error");
+  });
+
+  // 9. 返回客户端 WebSocket
   return new Response(null, {
     status: 101,
-    webSocket: client,
-  });
-}
-async function handleProxyWebSocket2(request, env, ctx) {
-  // 1. 只处理目标路径的 WebSocket 升级请求
-  if (request.headers.get('Upgrade') !== 'websocket') {
-    return new Response('Not Found', {status: 404});
-  }
-  const url = new URL(request.url);
-  const forwardParams = new URLSearchParams(url.searchParams);
-  forwardParams.delete("target");
-  const forwardSearch = forwardParams.toString();
-
-  const wsProtocol = env.PROXY_ORIGIN.startsWith('https') ? 'wss' : 'ws';
-  const wsBaseUrl = wsProtocol + '://' . env.PROXY_ORIGIN.split('://')[1];
-  // 3. 作为客户端连接到远程 WebSocket 服务器
-  // 注意：Cloudflare Worker 的环境支持 new WebSocket(url) [citation:1]
-  const remoteUrl = wsBaseUrl + url.pathname + (forwardSearch ? "?" + forwardSearch : "");
-  // 2. 创建 WebSocket 对，获取客户端和服务器端
-  const [client, server] = Object.values(new WebSocketPair());
-  server.accept();
-  const remote = new WebSocket(remoteUrl);
-  remote.accept();
-
-  // 4. 双向管道转发消息
-  // 客户端 -> 远程
-  server.addEventListener('message', (event) => {
-    if (remote.readyState === WebSocket.OPEN) {
-      console.log("cc",event.data)
-
-      remote.send(event.data);
-    }
-  });
-
-  // 远程 -> 客户端
-  remote.addEventListener('message', (event) => {
-    if (server.readyState === WebSocket.OPEN) {
-      console.log("dd",event.data)
-      server.send(event.data);
-    }
-  });
-
-  // 5. 处理连接关闭
-  server.addEventListener('close', () => remote.close());
-  remote.addEventListener('close', () => server.close());
-
-  // 6. 返回 101 Switching Protocols 响应，将客户端 WebSocket 交还给请求者
-  return new Response(null, {
-     status: 101,
-     webSocket: client,
+    webSocket: clientWs,
   });
 }
 
@@ -237,12 +152,11 @@ async function handleProxyUrl(request, env, ctx) {
     if (["POST", "PUT", "PATCH"].includes(request.method)) {
       init.body = request.body;
       // 保留原始 Content-Type
-      const ct = request.headers.get("Content-Type");
-      if (ct) init.headers.set("Content-Type", ct);
+      const ct = request.headers.get("content-type");
+      if (ct) init.headers.set("content-type", ct);
     }
     // 发起代理请求
     const response = await fetch(targetUrl, init);
-
     // 原样透传目标响应（包括 400 / 502 等错误状态），仅在返回头追加 CORS
     return withCORS(response, url, env);
   } catch (err) {
@@ -252,7 +166,7 @@ async function handleProxyUrl(request, env, ctx) {
     }
     return new Response(JSON.stringify({ error: err.message }), {
       status: 502,
-      headers: { "Content-Type": "application/json" },
+      headers: { "content-type": "application/json" },
     });
   }
 }
@@ -270,8 +184,12 @@ async function handleProxy(request, env, ctx) {
     return handleCORS();
   }
 
-  if (request.headers.get('Upgrade') === 'websocket') {
-    return await handleProxyWebSocket(request, env, ctx);
+  console.info("url:" + request.url + ":" + request.headers.get("upgrade"));
+  if (request.headers.get("upgrade") === "websocket") {
+    const resp =  await handleProxyWebSocket(request, env, ctx);
+    console.info("ws status:" + resp.status + ":" + request.url, resp);
+
+    return resp;
   }
 
   const url = new URL(request.url);
@@ -300,8 +218,8 @@ async function handleProxy(request, env, ctx) {
     if (["POST", "PUT", "PATCH"].includes(request.method)) {
       init.body = request.body;
       // 保留原始 Content-Type
-      const ct = request.headers.get("Content-Type");
-      if (ct) init.headers.set("Content-Type", ct);
+      const ct = request.headers.get("content-type");
+      if (ct) init.headers.set("content-type", ct);
     }
 
     let response = null;
@@ -325,8 +243,7 @@ async function handleProxy(request, env, ctx) {
     }
 
     return new Response(err.message, {
-      status: 502,
-      headers: { "Content-Type": "application/json" },
+      status: 502
     });
   }
 }
@@ -334,7 +251,7 @@ async function handleProxy(request, env, ctx) {
  * 将 WebSocket 升级请求转发到全局 Durable Object 完成订阅与分发。
  */
 function handleWebSocket(request, env) {
-  const upgrade = request.headers.get("Upgrade");
+  const upgrade = request.headers.get("upgrade");
   if (!upgrade || upgrade.toLowerCase() !== "websocket") {
     return new Response("Expected WebSocket upgrade", { status: 426 });
   }
@@ -448,9 +365,9 @@ export class WebSocketHub {
 
 function withCORS(response, workerUrl, env) {
   const respHeaders = new Headers(response.headers);
-  respHeaders.set("Access-Control-Allow-Origin", "*");
-  respHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS");
-  respHeaders.set("Access-Control-Allow-Headers", "*");
+  respHeaders.set("access-control-allow-origin", "*");
+  respHeaders.set("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS");
+  respHeaders.set("access-control-allow-headers", "*");
 
   if(env.FORCE_REWRITE){
     rewriteLocation(respHeaders, workerUrl);
@@ -470,14 +387,14 @@ function withCORS(response, workerUrl, env) {
  * 避免客户端被重定向到无法访问的内网主机。
  */
 function rewriteLocation(headers, workerUrl) {
-  const location = headers.get("Location");
+  const location = headers.get("location");
   if (!location || !workerUrl) return;
 
   try {
     const loc = new URL(location, workerUrl);
     if (loc.hostname !== TARGET_HOST) return;
     loc.host = workerUrl.host;
-    headers.set("Location", loc.toString());
+    headers.set("location", loc.toString());
   } catch {
     // Location 非法时保持原样
   }
@@ -487,10 +404,10 @@ function handleCORS() {
   return new Response(null, {
     status: 204,
     headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
-      "Access-Control-Allow-Headers": "*",
-      "Access-Control-Max-Age": "86400",
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
+      "access-control-allow-headers": "*",
+      "access-control-max-age": "86400",
     },
   });
 }
