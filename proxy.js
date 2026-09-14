@@ -56,13 +56,12 @@ async function handleProxyWebSocket(request, env, ctx) {
 
   // 目标 URL：host 仅用于 Host 头 / SNI，路径与查询保留原样
   const upstreamUrl = `${env.PROXY_ORIGIN}${url.pathname}${forwardSearch ? "?" + forwardSearch : ""}`;
+  const proxyHeaders = new Headers(request.headers);
+  ["host", "x-proxy-target", "cf-connecting-ip", "cf-ipcountry", "cf-ray", "cf-visitor", "cdn-loop"].forEach((h) => {
+    proxyHeaders.delete(h);
+  });
   const init = {
-    headers: {
-      // connection: "Upgrade",
-      upgrade: "websocket",
-      // 可以透传客户端的子协议等头
-      "sec-webSocket-protocol": request.headers.get("Sec-WebSocket-Protocol") || "",
-    }
+    headers: proxyHeaders
   }
   let upstreamResponse = null;
   if(env.PROXY_VPC){
