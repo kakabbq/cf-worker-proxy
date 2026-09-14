@@ -1,0 +1,31 @@
+name = "wifi"
+main = "proxy.js"
+compatibility_date = "2026-05-03"
+
+# 静态资源目录：命中 public/ 下的文件时直接返回，未命中才走 Worker 代理
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# Workers VPC：绑定私有网络中的 home-mac 服务
+[[vpc_services]]
+binding = "VPC_API_SERVICE"
+service_id = "01a09c3d-cf8a-7121-96ce-dd3bffde55ea"
+remote = true
+
+# WebSocket 分发用 Durable Object
+[[durable_objects.bindings]]
+name = "WS_HUB"
+class_name = "WebSocketHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WebSocketHub"]
+
+[vars]
+DEBUG_MODE = 0
+FORCE_REWRITE = 0
+# 标识 PROXY_ORIGIN 所代理的站点是那个VNC服务，如果为空则是外部站点
+PROXY_VPC = "VPC_API_SERVICE"
+PROXY_ORIGIN = "http://debian-wifi"
+
